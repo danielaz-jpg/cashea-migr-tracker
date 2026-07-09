@@ -435,6 +435,12 @@ export default function Home() {
           <NavItem active={view==='menciones'} onClick={()=>setView('menciones')}>
             Mis menciones {menciones.length>0 && <span style={{background:'#DC2626',color:'#fff',fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:10,marginLeft:'auto'}}>{menciones.length}</span>}
           </NavItem>
+          <NavItem active={view==='incidencias'} onClick={()=>setView('incidencias')}>
+            Incidencias {incidencias.filter(i=>i.estado==='Activa').length>0 && <span style={{background:'#DC2626',color:'#fff',fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:10,marginLeft:'auto'}}>{incidencias.filter(i=>i.estado==='Activa').length}</span>}
+          </NavItem>
+          <NavItem active={view==='metricas'} onClick={()=>setView('metricas')}>
+            Métricas
+          </NavItem>
 
           <div style={{fontSize:10,color:'#9A9A9A',letterSpacing:'.08em',textTransform:'uppercase',padding:'8px 8px 4px',fontWeight:600,marginTop:6}}>Etapas</div>
           {STAGES.map(s => (
