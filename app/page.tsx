@@ -970,11 +970,11 @@ function CsvModal({csvRows,onParse,onImport,onClose}:{csvRows:any[],onParse:(t:s
 
 
 function MetricasView({data, incidencias}:{data:Solicitud[], incidencias:Incidencia[]}) {
-  const [metFilter, setMetFilter] = React.useState('todos')
-  const [solFilterM, setSolFilterM] = React.useState('')
-  const [desde, setDesde] = React.useState('')
-  const [hasta, setHasta] = React.useState('')
-  const [showRango, setShowRango] = React.useState(false)
+  const [metFilter, setMetFilter] = useState('todos')
+  const [solFilterM, setSolFilterM] = useState('')
+  const [desde, setDesde] = useState('')
+  const [hasta, setHasta] = useState('')
+  const [showRango, setShowRango] = useState(false)
 
   const solicitantes = data.map(d=>d.solicitante).filter((s,i,arr)=>Boolean(s)&&arr.indexOf(s)===i) as string[]
 
