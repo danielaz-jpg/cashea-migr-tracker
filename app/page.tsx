@@ -1317,3 +1317,4 @@ function Field({label,children,hint,error}:{label:string,children:React.ReactNod
   )
 }
 const inputStyle:React.CSSProperties = {background:'#F5F5F5',border:'1.5px solid #EBEBEB',borderRadius:10,padding:'9px 12px',color:'#0A0A0A',fontSize:13,outline:'none',width:'100%',fontFamily:'inherit'}
+ 
