@@ -192,8 +192,8 @@ export default function Home() {
     const item = data.find(d => d.id === id)
     if (!item) return
     const tsKey = TS_MAP[newStage]
-    const updates: Partial<Solicitud> = { etapa_actual: newStage }
-    if (tsKey) updates[tsKey] = today() as any
+    const updates: any = { etapa_actual: newStage }
+    if (tsKey) updates[tsKey] = today()
     const { error } = await supabase.from('solicitudes').update(updates).eq('id', id)
     if (error) { showToast('Error al actualizar: ' + error.message, true); return }
     setData(prev => prev.map(d => d.id === id ? {...d, ...updates} : d))
@@ -237,10 +237,10 @@ export default function Home() {
   // ── Crear solicitud ──
   async function submitForm(form: Partial<Solicitud>) {
     const id = genId(data)
-    const nueva: Solicitud = {
+    const nueva: any = {
       id, etapa_actual: 'Nuevo', razon_bloqueo: '', ts_nuevo: today(),
-      ts_contrato_enviado:'', ts_contrato_firmado:'', ts_entidad_validada:'',
-      ts_odoo_configurado:'', ts_resuelto:'', notas_seguimiento:'',
+      ts_contrato_enviado:null, ts_contrato_firmado:null, ts_entidad_validada:null,
+      ts_odoo_configurado:null, ts_resuelto:null, notas_seguimiento:'',
       solicitante: currentUser?.email ?? '',
       nombre_aliado: form.nombre_aliado ?? '',
       rif: form.rif ?? '', razon_social: form.razon_social ?? '',
@@ -303,15 +303,15 @@ export default function Home() {
         canal_venta:r.canal_venta, tiendas:r.tiendas, motivo_cambio:r.motivo_cambio,
         comentarios:r.comentarios, solicitante:currentUser?.email??'',
         etapa_actual:'Nuevo' as Etapa, razon_bloqueo:'', ts_nuevo:hoy,
-        ts_contrato_enviado:'', ts_contrato_firmado:'', ts_entidad_validada:'',
-        ts_odoo_configurado:'', ts_resuelto:'', notas_seguimiento:'' })),
+        ts_contrato_enviado:null, ts_contrato_firmado:null, ts_entidad_validada:null,
+        ts_odoo_configurado:null, ts_resuelto:null, notas_seguimiento:'' })),
       ...dups.map(r => ({ id:genId([...data]), nombre_aliado:r.nombre_aliado, rif:r.rif,
         razon_social:r.razon_social, tier:r.tier, orden:r.orden, lending_fee:r.lending_fee,
         canal_venta:r.canal_venta, tiendas:r.tiendas, motivo_cambio:r.motivo_cambio,
         comentarios:r.comentarios, solicitante:currentUser?.email??'',
         etapa_actual:'Bloqueado' as Etapa, razon_bloqueo:'Ticket duplicado - '+r.dupReason,
-        ts_nuevo:hoy, ts_contrato_enviado:'', ts_contrato_firmado:'',
-        ts_entidad_validada:'', ts_odoo_configurado:'', ts_resuelto:'', notas_seguimiento:'' })),
+        ts_nuevo:hoy, ts_contrato_enviado:null, ts_contrato_firmado:null,
+        ts_entidad_validada:null, ts_odoo_coordinado:null, ts_resuelto:null, notas_seguimiento:'' })),
     ]
     const res = await fetch('/api/importar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({solicitudes:toInsert}) })
     const json = await res.json()
