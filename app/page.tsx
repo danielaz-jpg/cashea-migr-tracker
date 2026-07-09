@@ -90,7 +90,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState<UsuarioAutorizado|null>(null)
   const [role, setRole] = useState<Rol>('Todos')
-  const [view, setView] = useState<'kanban'|'list'|'menciones'|'incidencias'>('kanban')
+  const [view, setView] = useState<'kanban'|'list'|'menciones'|'incidencias'|'metricas'>('kanban')
   const [filterMode, setFilterMode] = useState('todos')
   const [stageFilter, setStageFilter] = useState<string|null>(null)
   const [solFilter, setSolFilter] = useState('')
@@ -484,6 +484,8 @@ export default function Home() {
             <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',color:'#9A9A9A'}}>Cargando...</div>
           ) : view === 'menciones' ? (
             <MencionesView items={menciones} onSelect={setSelectedId} />
+          ) : view === 'metricas' ? (
+            <MetricasView data={data} incidencias={incidencias} />
           ) : view === 'incidencias' ? (
             <IncidenciasView incidencias={incidencias} data={data} onMarcarCorregida={marcarCorregida} />
           ) : view === 'list' || stageFilter ? (
@@ -963,6 +965,189 @@ function CsvModal({csvRows,onParse,onImport,onClose}:{csvRows:any[],onParse:(t:s
         </div>
       )}
     </Modal>
+  )
+}
+
+
+function MetricasView({data, incidencias}:{data:Solicitud[], incidencias:Incidencia[]}) {
+  const [metFilter, setMetFilter] = React.useState('todos')
+  const [solFilterM, setSolFilterM] = React.useState('')
+  const [desde, setDesde] = React.useState('')
+  const [hasta, setHasta] = React.useState('')
+  const [showRango, setShowRango] = React.useState(false)
+
+  const solicitantes = data.map(d=>d.solicitante).filter((s,i,arr)=>Boolean(s)&&arr.indexOf(s)===i) as string[]
+
+  function getFiltered() {
+    let items = data.slice()
+    if (solFilterM) items = items.filter(d=>d.solicitante===solFilterM)
+    const now = new Date()
+    if (metFilter==='hoy') { const h=new Date();h.setHours(0,0,0,0);items=items.filter(d=>new Date(d.ts_nuevo)>=h) }
+    else if (metFilter==='semana') { const w=new Date();w.setDate(w.getDate()-7);items=items.filter(d=>new Date(d.ts_nuevo)>=w) }
+    else if (metFilter==='mes') { const m=new Date(now.getFullYear(),now.getMonth(),1);items=items.filter(d=>new Date(d.ts_nuevo)>=m) }
+    else if (metFilter==='rango'&&desde&&hasta) { const d0=new Date(desde);const d1=new Date(hasta);d1.setHours(23,59,59);items=items.filter(d=>{const t=new Date(d.ts_nuevo);return t>=d0&&t<=d1}) }
+    return items
+  }
+
+  const items = getFiltered()
+  const resueltas = items.filter(d=>d.etapa_actual==='Solicitud resuelta')
+  const bloqueadas = items.filter(d=>d.etapa_actual==='Bloqueado')
+  const incFiltradas = incidencias.filter(i=>items.some(d=>d.id===i.solicitud_id))
+  const tasaBloqueo = items.length ? Math.round(bloqueadas.length/items.length*100) : 0
+  const tasaError = resueltas.length ? Math.round(incFiltradas.length/resueltas.length*100) : 0
+  const tiempos = items.filter(d=>d.ts_nuevo&&d.ts_resuelto).map(d=>Math.floor((new Date(d.ts_resuelto).getTime()-new Date(d.ts_nuevo).getTime())/86400000)).filter(v=>v>=0)
+  const avgTotal = tiempos.length ? Math.round(tiempos.reduce((a,b)=>a+b,0)/tiempos.length) : null
+
+  function barChart(rows:{key:string,val:number}[], color:string) {
+    if (!rows.length) return <div style={{fontSize:12,color:'#9A9A9A',textAlign:'center' as const,padding:24}}>Sin datos</div>
+    const max = Math.max(...rows.map(r=>r.val))
+    return <div style={{display:'flex',flexDirection:'column' as const,gap:8}}>
+      {rows.map(r=>(
+        <div key={r.key} style={{display:'flex',alignItems:'center',gap:10,fontSize:12}}>
+          <div style={{width:120,flexShrink:0,color:'#5A5A5A',fontSize:11,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap' as const}} title={r.key}>{r.key}</div>
+          <div style={{flex:1,height:20,background:'#F5F5F5',borderRadius:4,overflow:'hidden'}}>
+            <div style={{height:'100%',background:color,borderRadius:4,width:(max?Math.round(r.val/max*100):0)+'%'}}/>
+          </div>
+          <div style={{minWidth:28,textAlign:'right' as const,fontWeight:700,fontSize:12}}>{r.val}</div>
+        </div>
+      ))}
+    </div>
+  }
+
+  const lineaCount:Record<string,number> = {}
+  items.forEach(d=>{ const k=d.orden||'Sin especificar'; lineaCount[k]=(lineaCount[k]||0)+1 })
+  const canalCount:Record<string,number> = {}
+  items.forEach(d=>{ const k=d.canal_venta||'Sin especificar'; canalCount[k]=(canalCount[k]||0)+1 })
+  const solCount:Record<string,number> = {}
+  items.forEach(d=>{ const k=(d.solicitante||'Sin asignar').replace('@cashea.app',''); solCount[k]=(solCount[k]||0)+1 })
+  const bloqCount:Record<string,number> = {}
+  bloqueadas.forEach(d=>{ const k=d.razon_bloqueo?.split(' - ')[0]||'Sin razon'; bloqCount[k]=(bloqCount[k]||0)+1 })
+  const incCatCount:Record<string,number> = {}
+  incFiltradas.forEach(i=>{ incCatCount[i.categoria]=(incCatCount[i.categoria]||0)+1 })
+  const porEtapa = STAGES.map(s=>({key:s.label,val:items.filter(d=>d.etapa_actual===s.id).length})).filter(r=>r.val>0)
+  const porTier = ['Tier 1','Tier 2','Tier 3','Tier 4'].map(t=>({key:t,val:items.filter(d=>d.tier===t).length})).filter(r=>r.val>0)
+  const porSol = Object.entries(solCount).map(([k,v])=>({key:k,val:v})).sort((a,b)=>b.val-a.val)
+  const porLinea = Object.entries(lineaCount).map(([k,v])=>({key:k,val:v})).sort((a,b)=>b.val-a.val)
+  const porCanal = Object.entries(canalCount).map(([k,v])=>({key:k,val:v})).sort((a,b)=>b.val-a.val)
+  const porBloqueo = Object.entries(bloqCount).map(([k,v])=>({key:k,val:v})).sort((a,b)=>b.val-a.val)
+  const porCatInc = Object.entries(incCatCount).map(([k,v])=>({key:k,val:v})).sort((a,b)=>b.val-a.val)
+  const solConInc = resueltas.filter(d=>incidencias.some(i=>i.solicitud_id===d.id))
+
+  const weeks:Record<string,number> = {}
+  items.filter(d=>d.ts_resuelto).forEach(d=>{ const dt=new Date(d.ts_resuelto);const day=dt.getDay();const diff=dt.getDate()-day+(day===0?-6:1);const mon=new Date(dt);mon.setDate(diff);const key=mon.toISOString().slice(0,10);weeks[key]=(weeks[key]||0)+1 })
+  const throughput = Object.keys(weeks).sort().slice(-8).map(k=>({key:k.slice(5),val:weeks[k]}))
+
+  const areaData = [
+    {label:'Legal',desde:'ts_nuevo' as keyof Solicitud,hasta:'ts_contrato_firmado' as keyof Solicitud},
+    {label:'MI',desde:'ts_contrato_firmado' as keyof Solicitud,hasta:'ts_odoo_configurado' as keyof Solicitud},
+    {label:'Activaciones',desde:'ts_odoo_configurado' as keyof Solicitud,hasta:'ts_resuelto' as keyof Solicitud},
+  ].map(a=>{
+    const vals = items.map(d=>{ const s=d[a.desde] as string;const e=d[a.hasta] as string;if(!s||!e)return null;const v=Math.floor((new Date(e).getTime()-new Date(s).getTime())/86400000);return v>=0?v:null}).filter((v):v is number=>v!==null)
+    return {key:a.label,val:vals.length?Math.round(vals.reduce((x,y)=>x+y,0)/vals.length):0}
+  }).filter(r=>r.val>0)
+
+  const C = ({title,sub,ch,full}:{title:string,sub:string,ch:React.ReactNode,full?:boolean}) => (
+    <div style={{background:'#fff',borderRadius:14,padding:18,border:'1px solid #EBEBEB',boxShadow:'0 1px 3px rgba(0,0,0,.08)',gridColumn:full?'1/-1' as const:'auto'}}>
+      <div style={{fontSize:11,fontWeight:600,color:'#9A9A9A',letterSpacing:'.06em',textTransform:'uppercase' as const,marginBottom:2}}>{title}</div>
+      <div style={{fontSize:11,color:'#9A9A9A',marginBottom:14}}>{sub}</div>
+      {ch}
+    </div>
+  )
+
+  return (
+    <div style={{flex:1,overflowY:'auto',padding:20,background:'#F5F5F5'}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16,flexWrap:'wrap' as const}}>
+        <div style={{fontWeight:700,fontSize:15,flex:1}}>Dashboard de metricas</div>
+        <div style={{display:'flex',gap:5,flexWrap:'wrap' as const}}>
+          {['todos','hoy','semana','mes'].map(f=>(
+            <button key={f} onClick={()=>{setMetFilter(f);setShowRango(false)}}
+              style={{padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:500,border:'1px solid',cursor:'pointer',
+                background:metFilter===f&&!showRango?'#0A0A0A':'transparent',
+                borderColor:metFilter===f&&!showRango?'#0A0A0A':'#EBEBEB',
+                color:metFilter===f&&!showRango?'#FDFA3D':'#5A5A5A'}}>
+              {f==='todos'?'Todos':f==='hoy'?'Hoy':f==='semana'?'Esta semana':'Este mes'}
+            </button>
+          ))}
+          <button onClick={()=>setShowRango(!showRango)}
+            style={{padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:500,border:'1px solid',cursor:'pointer',
+              background:showRango?'#0A0A0A':'transparent',borderColor:showRango?'#0A0A0A':'#EBEBEB',color:showRango?'#FDFA3D':'#5A5A5A'}}>
+            Rango
+          </button>
+        </div>
+        {showRango && <div style={{display:'flex',gap:6,alignItems:'center'}}>
+          <input type="date" value={desde} onChange={e=>{setDesde(e.target.value);setMetFilter('rango')}} style={{fontSize:12,padding:'5px 8px',border:'1.5px solid #EBEBEB',borderRadius:8,outline:'none'}}/>
+          <span style={{fontSize:12,color:'#9A9A9A'}}>a</span>
+          <input type="date" value={hasta} onChange={e=>{setHasta(e.target.value);setMetFilter('rango')}} style={{fontSize:12,padding:'5px 8px',border:'1.5px solid #EBEBEB',borderRadius:8,outline:'none'}}/>
+        </div>}
+        <select value={solFilterM} onChange={e=>setSolFilterM(e.target.value)} style={{padding:'5px 10px',borderRadius:20,fontSize:12,border:'1px solid #EBEBEB',background:'transparent',cursor:'pointer',outline:'none'}}>
+          <option value="">Todos los solicitantes</option>
+          {solicitantes.map(s=><option key={s} value={s}>{s.replace('@cashea.app','')}</option>)}
+        </select>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:12,marginBottom:16}}>
+        {[
+          {n:items.length,l:'Total',c:'#0A0A0A'},
+          {n:resueltas.length,l:'Resueltas',c:'#16A34A'},
+          {n:bloqueadas.length,l:'Bloqueadas',c:'#DC2626'},
+          {n:tasaBloqueo+'%',l:'Tasa bloqueo',c:'#EA580C'},
+          {n:avgTotal!==null?avgTotal+'d':'sin datos',l:'Dias prom. cierre',c:'#2563EB'},
+        ].map(k=>(
+          <div key={k.l} style={{background:'#fff',borderRadius:14,padding:'12px 14px',border:'1px solid #EBEBEB',boxShadow:'0 1px 3px rgba(0,0,0,.08)'}}>
+            <div style={{fontSize:20,fontWeight:700,color:k.c,letterSpacing:'-.02em'}}>{k.n}</div>
+            <div style={{fontSize:10,color:'#9A9A9A',textTransform:'uppercase' as const,letterSpacing:'.05em',fontWeight:500,marginTop:2}}>{k.l}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
+        {[
+          {n:incFiltradas.length,l:'Incidencias',c:'#DC2626'},
+          {n:incFiltradas.filter(i=>i.estado==='Activa').length,l:'Activas',c:'#EA580C'},
+          {n:incFiltradas.filter(i=>i.estado==='Corregida').length,l:'Corregidas',c:'#16A34A'},
+          {n:tasaError+'%',l:'Tasa de error',c:'#7C3AED'},
+        ].map(k=>(
+          <div key={k.l} style={{background:'#fff',borderRadius:14,padding:'12px 14px',border:'1px solid rgba(220,38,38,.15)',boxShadow:'0 1px 3px rgba(0,0,0,.08)'}}>
+            <div style={{fontSize:20,fontWeight:700,color:k.c,letterSpacing:'-.02em'}}>{k.n}</div>
+            <div style={{fontSize:10,color:'#9A9A9A',textTransform:'uppercase' as const,letterSpacing:'.05em',fontWeight:500,marginTop:2}}>{k.l}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+        <C title="Solicitudes por etapa" sub="Distribucion actual del pipeline" ch={barChart(porEtapa,'#2563EB')}/>
+        <C title="Por solicitante" sub="Cuantas levanto cada persona" ch={barChart(porSol,'#0A0A0A')}/>
+        <C title="Tipo de linea" sub="LP vs LC vs Ambas" ch={barChart(porLinea,'#7C3AED')}/>
+        <C title="Canal de venta" sub="Solicitudes por canal" ch={barChart(porCanal,'#0D9488')}/>
+        <C title="Distribucion por tier" sub="Agrupado por tier del aliado" ch={barChart(porTier,'#EA580C')}/>
+        <C title="Throughput semanal" sub="Resueltas por semana (ultimas 8)" ch={throughput.length?barChart(throughput,'#16A34A'):<div style={{fontSize:12,color:'#9A9A9A',textAlign:'center' as const,padding:24}}>Sin resueltas</div>}/>
+        <C title="Razones de bloqueo" sub="Causas mas frecuentes" ch={porBloqueo.length?barChart(porBloqueo,'#DC2626'):<div style={{fontSize:12,color:'#9A9A9A',textAlign:'center' as const,padding:24}}>Sin bloqueos</div>}/>
+        <C title="Tiempo por area" sub="Dias promedio por equipo" ch={areaData.length?barChart(areaData,'#0D9488'):<div style={{fontSize:12,color:'#9A9A9A',textAlign:'center' as const,padding:24}}>Necesitas solicitudes completadas</div>}/>
+        <C title="Causas de incidencia" sub="Que fallo mas frecuentemente" full ch={porCatInc.length?barChart(porCatInc,'#DC2626'):<div style={{fontSize:12,color:'#9A9A9A',textAlign:'center' as const,padding:24}}>Sin incidencias aun</div>}/>
+        <C title="Solicitudes resueltas con incidencia" sub={resueltas.length+' resueltas, '+solConInc.length+' con error ('+tasaError+'%)'} full ch={
+          resueltas.length===0 ? <div style={{fontSize:12,color:'#9A9A9A',textAlign:'center' as const,padding:24}}>Sin solicitudes resueltas aun</div> :
+          <table style={{width:'100%',borderCollapse:'collapse' as const,fontSize:12}}>
+            <thead><tr style={{borderBottom:'2px solid #EBEBEB'}}>
+              {['ID','Aliado','Solicitante','Resuelta','Incidencias','Categorias'].map(h=>(
+                <th key={h} style={{textAlign:'left' as const,padding:'7px 10px',color:'#9A9A9A',fontSize:10,fontWeight:700,letterSpacing:'.06em',textTransform:'uppercase' as const}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {resueltas.map(d=>{
+                const incs = incidencias.filter(i=>i.solicitud_id===d.id)
+                return (
+                  <tr key={d.id} style={{borderBottom:'1px solid #EBEBEB',background:incs.length?'#FEF2F2':'#fff'}}>
+                    <td style={{padding:'8px 10px',fontFamily:'monospace',color:'#9A9A9A',fontSize:11}}>{d.id}</td>
+                    <td style={{padding:'8px 10px',fontWeight:600}}>{d.nombre_aliado}</td>
+                    <td style={{padding:'8px 10px',fontSize:11,color:'#5A5A5A'}}>{(d.solicitante||'').replace('@cashea.app','')}</td>
+                    <td style={{padding:'8px 10px',fontSize:11,fontFamily:'monospace',color:'#9A9A9A'}}>{d.ts_resuelto||'—'}</td>
+                    <td style={{padding:'8px 10px',textAlign:'center' as const}}>{incs.length?<span style={{fontWeight:700,color:'#DC2626'}}>{incs.length}</span>:<span style={{color:'#16A34A'}}>OK</span>}</td>
+                    <td style={{padding:'8px 10px',fontSize:11,color:'#DC2626',maxWidth:200}}>{incs.map(i=>i.categoria).join(', ')||'—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        }/>
+      </div>
+    </div>
   )
 }
 
