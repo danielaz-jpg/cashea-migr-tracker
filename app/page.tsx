@@ -90,7 +90,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState<UsuarioAutorizado|null>(null)
   const [role, setRole] = useState<Rol>('Todos')
-  const [view, setView] = useState<'kanban'|'list'|'menciones'>('kanban')
+  const [view, setView] = useState<'kanban'|'list'|'menciones'|'incidencias'>('kanban')
   const [filterMode, setFilterMode] = useState('todos')
   const [stageFilter, setStageFilter] = useState<string|null>(null)
   const [solFilter, setSolFilter] = useState('')
