@@ -37,11 +37,11 @@ export interface UsuarioAutorizado {
   id: number
   email: string
   nombre: string
-  equipo: 'Legal' | 'MI' | 'Activaciones' | 'Todos'
+  equipo: 'Legal' | 'MI' | 'Activaciones' | 'Comercial' | 'Todos'
   activo: boolean
 }
 
-export type Rol = 'Legal' | 'MI' | 'Activaciones' | 'Todos'
+export type Rol = 'Legal' | 'MI' | 'Activaciones' | 'Comercial' | 'Todos'
 
 export interface Incidencia {
   id?: number

@@ -7,20 +7,42 @@ import { Solicitud, Rol, UsuarioAutorizado, Etapa, Incidencia } from '@/lib/type
 // ── Constantes ──────────────────────────────────────────────────
 const STAGES = [
   { id: 'Nuevo',                           label: 'Nuevo',                  color: '#2563EB', cls: 's-nuevo'    },
-  { id: 'Enviando contrato',               label: 'Enviando contrato',      color: '#EA580C', cls: 's-cenv'     },
-  { id: 'Firma de contrato',               label: 'Firma de contrato',      color: '#7C3AED', cls: 's-cfirm'    },
+  { id: 'Enviando contrato',               label: 'Revisión legal',         color: '#EA580C', cls: 's-cenv'     },
+  { id: 'Firma de contrato',               label: 'Pendiente firma',        color: '#7C3AED', cls: 's-cfirm'    },
   { id: 'Revision de Entidad Legal en ABM',label: 'Revision Entidad Legal', color: '#B45309', cls: 's-entidad'  },
   { id: 'Configuracion de ODOO',           label: 'Config. ODOO & ServTech',color: '#0D9488', cls: 's-odoo'    },
   { id: 'Solicitud resuelta',              label: 'Solicitud resuelta',     color: '#16A34A', cls: 's-resuelto' },
   { id: 'Bloqueado',                       label: 'Bloqueado',              color: '#DC2626', cls: 's-bloqueado'},
 ] as const
 
-const ROLE_STAGES: Record<Rol, string[]> = {
-  Legal:       ['Nuevo','Enviando contrato','Firma de contrato','Bloqueado'],
-  MI:          ['Revision de Entidad Legal en ABM','Bloqueado'],
-  Activaciones:['Configuracion de ODOO','Solicitud resuelta','Bloqueado'],
-  Todos:       STAGES.map(s => s.id),
+// Etapas sobre las que cada rol puede ACTUAR (mover / editar / bloquear).
+// MI y Todos son admin: actúan sobre todo (ver helpers isAdminRole / canActOnStage).
+const OWNER_STAGES: Record<Rol, string[]> = {
+  Legal:        ['Nuevo','Enviando contrato','Firma de contrato'],
+  MI:           [],
+  Activaciones: ['Configuracion de ODOO'],
+  Comercial:    [],
+  Todos:        [],
 }
+const NEXT_STAGE: Record<string, Etapa> = {
+  'Nuevo':                             'Enviando contrato',
+  'Enviando contrato':                 'Firma de contrato',
+  'Firma de contrato':                 'Revision de Entidad Legal en ABM',
+  'Revision de Entidad Legal en ABM':  'Configuracion de ODOO',
+  'Configuracion de ODOO':             'Solicitud resuelta',
+}
+const ADVANCE_LABEL: Record<string, string> = {
+  'Nuevo':                             '→ Mover a Revisión legal',
+  'Enviando contrato':                 '✍ Mover a Pendiente firma',
+  'Firma de contrato':                 '→ Contratos firmados, pasar a MI',
+  'Revision de Entidad Legal en ABM':  '→ Entidad validada, pasar a Activaciones',
+  'Configuracion de ODOO':             '🚀 Marcar como resuelta',
+}
+// Capacidades por rol (guardarraíles de UI — la seguridad real requeriría RLS en Supabase)
+const CAN_CREATE: Rol[] = ['Legal','MI','Todos']
+const CAN_IMPORT: Rol[] = ['Legal','MI','Comercial','Todos']
+const CAN_EXPORT: Rol[] = ['Legal','MI','Activaciones','Todos']
+const CAN_MARCAR: Rol[] = ['MI','Activaciones','Todos']
 
 const TS_MAP: Record<string, keyof Solicitud> = {
   'Enviando contrato':                'ts_contrato_enviado',
@@ -38,8 +60,8 @@ const STAGE_ORDER = [
 const RAZONES_BLOQUEO = [
   'Sin respuesta del solicitante-ABM','Listado de tiendas inconsistente-ABM',
   'RIF vs. RS no coincide-ABM','Razon social incorrecta','Ya es lending',
-  'Aliado ya esta en lending','Ticket duplicado','Aliado desistio de migrar',
-  'En separacion de razon social','Pend modificacion de lending fee',
+  'Ticket duplicado','Aliado desistio de migrar',
+  'En separacion de razon social','Lending fee en negociación',
   'Tipo de linea incorrecto','Contrato base vencido',
 ]
 
@@ -83,6 +105,36 @@ function genId(existing: Solicitud[]) {
   const next = nums.length ? Math.max(...nums) + 1 : 1
   return `MIG-${String(next).padStart(3,'0')}`
 }
+function stageLabel(id: string) { return STAGES.find(s => s.id === id)?.label ?? id }
+
+// ── Permisos (guardarraíles de UI) ──────────────────────────────
+function isAdminRole(r: Rol) { return r === 'MI' || r === 'Todos' }
+function canActOnStage(r: Rol, stage: string) { return isAdminRole(r) || OWNER_STAGES[r].includes(stage) }
+function canEditData(r: Rol, stage: string) { return r !== 'Comercial' && canActOnStage(r, stage) }
+
+// ── Exportar CSV ────────────────────────────────────────────────
+function csvCell(v: any) {
+  const s = (v ?? '').toString()
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s
+}
+function exportSolicitudesCsv(items: Solicitud[], etiqueta: string) {
+  const headers = ['ID','Aliado','Razon social','RIF','Tier','Tipo linea','Lending fee','Canal venta',
+    'Solicitante','Etapa','Dias en etapa','Dias en pipeline','Tiendas','Motivo','Comentarios','Razon bloqueo','Notas']
+  const rows = items.map(d => [
+    d.id, d.nombre_aliado, d.razon_social, d.rif, d.tier, d.orden, d.lending_fee, d.canal_venta,
+    d.solicitante, stageLabel(d.etapa_actual),
+    stageAge(d) ?? '', pipelineAge(d) ?? '',
+    d.tiendas, d.motivo_cambio, d.comentarios, d.razon_bloqueo, d.notas_seguimiento,
+  ])
+  const csv = [headers, ...rows].map(r => r.map(csvCell).join(',')).join('\n')
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `solicitudes_${etiqueta.replace(/[^a-z0-9]+/gi,'_').toLowerCase()}_${today()}.csv`
+  document.body.appendChild(a); a.click(); document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
 
 // ── Componente principal ─────────────────────────────────────────
 export default function Home() {
@@ -111,6 +163,8 @@ export default function Home() {
   const [incidenciaTargetId, setIncidenciaTargetId] = useState<string|null>(null)
   const [incidencias, setIncidencias] = useState<Incidencia[]>([])
   const [lastCsvHash, setLastCsvHash] = useState('')
+  const [showEditModal, setShowEditModal] = useState(false)
+  const [editTargetId, setEditTargetId] = useState<string|null>(null)
 
   // ── Toast ──
   function showToast(msg: string, err = false) {
@@ -175,9 +229,9 @@ export default function Home() {
     showToast('Incidencia marcada como corregida')
   }
 
-  // ── Filtros ──
+  // ── Filtros ── (todos los roles ven el pipeline completo; los permisos gatean acciones)
   function getFiltered() {
-    let items = data.filter(d => ROLE_STAGES[role].includes(d.etapa_actual))
+    let items = data.slice()
     if (solFilter) items = items.filter(d => d.solicitante === solFilter)
     const now = new Date()
     if (filterMode === 'hoy') { const h = new Date(); h.setHours(0,0,0,0); items = items.filter(d => new Date(d.ts_nuevo) >= h) }
@@ -191,6 +245,7 @@ export default function Home() {
   async function advance(id: string, newStage: Etapa) {
     const item = data.find(d => d.id === id)
     if (!item) return
+    if (!canActOnStage(role, item.etapa_actual)) { showToast('No tienes permisos para mover esta etapa', true); return }
     const tsKey = TS_MAP[newStage]
     const updates: any = { etapa_actual: newStage }
     if (tsKey) updates[tsKey] = today()
@@ -198,7 +253,45 @@ export default function Home() {
     if (error) { showToast('Error al actualizar: ' + error.message, true); return }
     setData(prev => prev.map(d => d.id === id ? {...d, ...updates} : d))
     setSelectedId(null)
-    showToast(`${item.nombre_aliado} → ${newStage}`)
+    showToast(`${item.nombre_aliado} → ${stageLabel(newStage)}`)
+  }
+
+  // ── Avanzar en bloque (actualización masiva de estatus) ──
+  async function bulkAdvance(ids: string[], fromStage: string) {
+    if (!canActOnStage(role, fromStage)) { showToast('No tienes permisos para mover esta etapa', true); return }
+    const newStage = NEXT_STAGE[fromStage]
+    if (!newStage || !ids.length) return
+    const tsKey = TS_MAP[newStage]
+    const updates: any = { etapa_actual: newStage }
+    if (tsKey) updates[tsKey] = today()
+    const { error } = await supabase.from('solicitudes').update(updates).in('id', ids)
+    if (error) { showToast('Error al actualizar: ' + error.message, true); return }
+    setData(prev => prev.map(d => ids.includes(d.id) ? {...d, ...updates} : d))
+    showToast(`${ids.length} solicitud${ids.length>1?'es':''} → ${stageLabel(newStage)}`)
+  }
+
+  // ── Editar datos del ticket ──
+  async function submitEdit(fields: Partial<Solicitud>) {
+    const item = data.find(d => d.id === editTargetId)
+    if (!item) return
+    if (!canEditData(role, item.etapa_actual)) { showToast('No tienes permisos para editar esta solicitud', true); return }
+    const updates = {
+      nombre_aliado: fields.nombre_aliado ?? item.nombre_aliado,
+      razon_social: fields.razon_social ?? item.razon_social,
+      rif: fields.rif ?? item.rif,
+      tier: fields.tier ?? item.tier,
+      orden: fields.orden ?? item.orden,
+      lending_fee: fields.lending_fee ?? item.lending_fee,
+      canal_venta: fields.canal_venta ?? item.canal_venta,
+      tiendas: fields.tiendas ?? item.tiendas,
+      motivo_cambio: fields.motivo_cambio ?? item.motivo_cambio,
+      comentarios: fields.comentarios ?? item.comentarios,
+    }
+    const { error } = await supabase.from('solicitudes').update(updates).eq('id', editTargetId!)
+    if (error) { showToast('Error al editar: ' + error.message, true); return }
+    setData(prev => prev.map(d => d.id === editTargetId ? {...d, ...updates} : d))
+    setShowEditModal(false); setEditTargetId(null)
+    showToast(`${updates.nombre_aliado} actualizada`)
   }
 
   // ── Bloquear ──
@@ -324,9 +417,16 @@ export default function Home() {
 
   // ── Search ──
   useEffect(() => {
-    if (!searchQ.trim()) { setSearchResults([]); return }
-    const q = searchQ.toLowerCase()
-    setSearchResults(data.filter(d => d.razon_social?.toLowerCase().includes(q)))
+    const raw = searchQ.trim()
+    if (!raw) { setSearchResults([]); return }
+    const q = raw.toLowerCase()
+    // Detecta RIF con formato E/V/J + guión + 8-9 dígitos (con o sin guión al escribir)
+    const isRif = /^[vej]-?\d{6,9}$/i.test(raw.replace(/\s/g,''))
+    const norm = (s: string) => (s||'').toLowerCase().replace(/[\s-]/g,'')
+    setSearchResults(data.filter(d =>
+      d.razon_social?.toLowerCase().includes(q) ||
+      (isRif && norm(d.rif).includes(norm(raw)))
+    ))
   }, [searchQ, data])
 
   // ── Menciones ──
@@ -356,24 +456,22 @@ export default function Home() {
         <div style={{marginLeft:'auto',display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
           <span style={{fontSize:11,color:'rgba(255,255,255,.4)',fontFamily:'monospace'}}>{currentUser.email}</span>
           <div style={{width:1,height:18,background:'rgba(255,255,255,.1)'}}/>
-          {(['Legal','MI','Activaciones','Todos'] as Rol[]).map(r => (
-            <button key={r} onClick={() => setRole(r)}
-              style={{padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:500,border:'1px solid',cursor:'pointer',transition:'all .15s',
-                background:role===r?'#FDFA3D':'transparent',
-                borderColor:role===r?'#FDFA3D':'rgba(255,255,255,.15)',
-                color:role===r?'#0A0A0A':'rgba(255,255,255,.5)'}}>
-              {r}
-            </button>
-          ))}
+          <span title="Tu rol está definido por tu equipo" style={{padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:700,background:'#FDFA3D',color:'#0A0A0A'}}>
+            {role}
+          </span>
           <div style={{width:1,height:18,background:'rgba(255,255,255,.1)'}}/>
-          <button onClick={() => setShowCsvModal(true)}
-            style={{padding:'7px 12px',borderRadius:20,border:'1px solid rgba(255,255,255,.15)',background:'transparent',color:'rgba(255,255,255,.5)',cursor:'pointer',fontSize:12}}>
-            ↑ CSV
-          </button>
-          <button onClick={() => setShowForm(true)}
-            style={{padding:'7px 14px',background:'#FDFA3D',color:'#0A0A0A',border:'none',borderRadius:20,fontWeight:700,fontSize:12,cursor:'pointer'}}>
-            + Nueva solicitud
-          </button>
+          {CAN_IMPORT.includes(role) && (
+            <button onClick={() => setShowCsvModal(true)}
+              style={{padding:'7px 12px',borderRadius:20,border:'1px solid rgba(255,255,255,.15)',background:'transparent',color:'rgba(255,255,255,.5)',cursor:'pointer',fontSize:12}}>
+              ↑ CSV
+            </button>
+          )}
+          {CAN_CREATE.includes(role) && (
+            <button onClick={() => setShowForm(true)}
+              style={{padding:'7px 14px',background:'#FDFA3D',color:'#0A0A0A',border:'none',borderRadius:20,fontWeight:700,fontSize:12,cursor:'pointer'}}>
+              + Nueva solicitud
+            </button>
+          )}
         </div>
       </div>
 
@@ -398,7 +496,7 @@ export default function Home() {
         <div style={{width:215,background:'#fff',borderRight:'1px solid #EBEBEB',padding:'14px 10px',display:'flex',flexDirection:'column',gap:2,flexShrink:0,overflowY:'auto'}}>
           <div style={{fontSize:10,color:'#9A9A9A',letterSpacing:'.08em',textTransform:'uppercase',padding:'8px 8px 4px',fontWeight:600}}>Buscar ticket</div>
           <div style={{position:'relative',marginBottom:4}}>
-            <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Razon social exacta..."
+            <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Razón social o RIF..."
               style={{width:'100%',background:'#F5F5F5',border:'1.5px solid #EBEBEB',borderRadius:10,padding:'8px 10px 8px 30px',fontSize:12,outline:'none',fontFamily:'inherit'}}/>
             <svg style={{position:'absolute',left:9,top:'50%',transform:'translateY(-50%)',color:'#9A9A9A',pointerEvents:'none'}} width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="6.5" cy="6.5" r="4.5"/><line x1="10" y1="10" x2="14" y2="14"/></svg>
           </div>
@@ -462,7 +560,7 @@ export default function Home() {
               </div>
               <div style={{fontSize:11,color:'#9A9A9A'}}>
                 {view==='menciones' ? 'Tickets donde fuiste mencionado' :
-                  {Legal:'Nuevo → Contrato → Firma',MI:'Revision Entidad Legal',Activaciones:'ODOO → Resuelta',Todos:'Vista completa'}[role]}
+                  ({Legal:'Editas: Nuevo → Revisión legal → Pendiente firma',MI:'Vista completa · acceso total',Activaciones:'Editas: Config. ODOO → Resuelta',Comercial:'Vista completa · solo lectura + notas',Todos:'Vista completa · acceso total'} as Record<Rol,string>)[role]}
               </div>
             </div>
             {view !== 'menciones' && (
@@ -493,9 +591,13 @@ export default function Home() {
           ) : view === 'metricas' ? (
             <MetricasView data={data} incidencias={incidencias} />
           ) : view === 'incidencias' ? (
-            <IncidenciasView incidencias={incidencias} data={data} onMarcarCorregida={marcarCorregida} />
+            <IncidenciasView incidencias={incidencias} data={data} onMarcarCorregida={marcarCorregida} canMarcar={CAN_MARCAR.includes(role)} />
           ) : view === 'list' || stageFilter ? (
-            <ListView items={filtered} onSelect={setSelectedId} showBlocked={stageFilter==='Bloqueado'} />
+            <ListView items={filtered} onSelect={setSelectedId} showBlocked={stageFilter==='Bloqueado'}
+              stageFilter={stageFilter}
+              canExport={CAN_EXPORT.includes(role)}
+              canBulkMove={!!stageFilter && !!NEXT_STAGE[stageFilter] && canActOnStage(role, stageFilter)}
+              onBulkAdvance={bulkAdvance} />
           ) : (
             <KanbanView items={filtered} role={role} onSelect={setSelectedId} />
           )}
@@ -510,13 +612,17 @@ export default function Home() {
           onBloquear={id=>{setBloqTargetId(id);setShowBloqModal(true)}}
           onNota={id=>{setNotaTargetId(id);setShowNotaModal(true)}}
           onIncidencia={id=>{setIncidenciaTargetId(id);setShowIncidenciaModal(true)}}
+          onEditar={id=>{setEditTargetId(id);setShowEditModal(true)}}
+          canEditar={canEditData(role, selected.etapa_actual)}
           incidencias={incidencias.filter(i=>i.solicitud_id===selected.id)}
           onMarcarCorregida={marcarCorregida}
+          canMarcar={CAN_MARCAR.includes(role)}
         />
       )}
 
       {/* Modales */}
       {showForm && <FormModal user={currentUser} existing={data} onSubmit={submitForm} onClose={()=>setShowForm(false)}/>}
+      {showEditModal && editTargetId && <EditModal item={data.find(d=>d.id===editTargetId)!} onSubmit={submitEdit} onClose={()=>{setShowEditModal(false);setEditTargetId(null)}}/>}
       {showBloqModal && <BloqModal onConfirm={confirmBloqueo} onClose={()=>setShowBloqModal(false)}/>}
       {showNotaModal && <NotaModal onSubmit={submitNota} onClose={()=>setShowNotaModal(false)}/>}
       {showCsvModal && <CsvModal csvRows={csvRows} onParse={parseCsv} onImport={importCsv} onClose={()=>{setShowCsvModal(false);setCsvRows([])}}/>}
@@ -553,7 +659,7 @@ function NavBadge({children}:{children:React.ReactNode}) {
 }
 
 function KanbanView({items,role,onSelect}:{items:Solicitud[],role:Rol,onSelect:(id:string)=>void}) {
-  const stages = STAGES.filter(s => ROLE_STAGES[role].includes(s.id))
+  const stages = STAGES
   return (
     <div style={{display:'flex',gap:12,flex:1,overflowX:'auto',padding:16,alignItems:'flex-start'}}>
       {stages.map(col => {
@@ -606,12 +712,46 @@ function KanbanCard({item,color,onSelect}:{item:Solicitud,color:string,onSelect:
   )
 }
 
-function ListView({items,onSelect,showBlocked}:{items:Solicitud[],onSelect:(id:string)=>void,showBlocked?:boolean}) {
+function ListView({items,onSelect,showBlocked,stageFilter,canExport,canBulkMove,onBulkAdvance}:{
+  items:Solicitud[],onSelect:(id:string)=>void,showBlocked?:boolean,
+  stageFilter?:string|null,canExport?:boolean,canBulkMove?:boolean,
+  onBulkAdvance?:(ids:string[],fromStage:string)=>void,
+}) {
+  const [selected, setSelected] = useState<string[]>([])
+  useEffect(()=>{ setSelected([]) }, [stageFilter, items.length])
+  const showSelect = !!canBulkMove
+  const nextLabel = stageFilter ? stageLabel(NEXT_STAGE[stageFilter] || '') : ''
+  const allSelected = items.length>0 && selected.length===items.length
+  const toggle = (id:string) => setSelected(p => p.includes(id) ? p.filter(x=>x!==id) : [...p,id])
+  const toggleAll = () => setSelected(allSelected ? [] : items.map(i=>i.id))
+  const colCount = (showSelect?1:0) + 8 + (showBlocked?1:0)
+
   return (
     <div style={{flex:1,overflowY:'auto',padding:16}}>
+      {(canExport || showSelect) && (
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12,flexWrap:'wrap'}}>
+          {showSelect && selected.length>0 && (
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{fontSize:12,fontWeight:600,color:'#5A5A5A'}}>{selected.length} seleccionada{selected.length>1?'s':''}</span>
+              <button onClick={()=>{onBulkAdvance?.(selected, stageFilter!);setSelected([])}}
+                style={{padding:'6px 14px',borderRadius:20,border:'none',background:'#0A0A0A',color:'#FDFA3D',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                Mover a {nextLabel} →
+              </button>
+              <button onClick={()=>setSelected([])} style={{padding:'6px 12px',borderRadius:20,border:'1.5px solid #EBEBEB',background:'transparent',color:'#5A5A5A',cursor:'pointer',fontSize:12,fontWeight:500}}>Limpiar</button>
+            </div>
+          )}
+          {canExport && (
+            <button onClick={()=>exportSolicitudesCsv(items, stageFilter?stageLabel(stageFilter):'pipeline')}
+              style={{marginLeft:'auto',padding:'6px 14px',borderRadius:20,border:'1.5px solid #EBEBEB',background:'transparent',color:'#0A0A0A',cursor:'pointer',fontSize:12,fontWeight:600}}>
+              ↓ Exportar CSV ({items.length})
+            </button>
+          )}
+        </div>
+      )}
       <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
         <thead>
           <tr style={{borderBottom:'2px solid #EBEBEB'}}>
+            {showSelect && <th style={{padding:'8px 12px',width:32}}><input type="checkbox" checked={allSelected} onChange={toggleAll} style={{cursor:'pointer'}}/></th>}
             {['ID','Aliado','RIF','Solicitante','Canal','Días etapa','Días pipeline','Comentarios',...(showBlocked?['Razón bloqueo']:[])].map(h=>(
               <th key={h} style={{textAlign:'left',padding:'8px 12px',color:'#9A9A9A',fontSize:10,fontWeight:700,letterSpacing:'.06em',textTransform:'uppercase'}}>{h}</th>
             ))}
@@ -619,22 +759,24 @@ function ListView({items,onSelect,showBlocked}:{items:Solicitud[],onSelect:(id:s
         </thead>
         <tbody>
           {items.length === 0 ? (
-            <tr><td colSpan={9} style={{textAlign:'center',padding:28,color:'#9A9A9A'}}>Sin solicitudes</td></tr>
+            <tr><td colSpan={colCount} style={{textAlign:'center',padding:28,color:'#9A9A9A'}}>Sin solicitudes</td></tr>
           ) : items.map(item => {
             const ds = stageAge(item); const dp = pipelineAge(item)
             const sol = item.solicitante?.replace('@cashea.app','')
             const dColor = ds===null?'#9A9A9A':ds>14?'#DC2626':ds>7?'#EA580C':'#0A0A0A'
+            const isSel = selected.includes(item.id)
             return (
-              <tr key={item.id} onClick={()=>onSelect(item.id)} style={{borderBottom:'1px solid #EBEBEB',cursor:'pointer',background:'#fff',transition:'background .1s'}}>
-                <td style={{padding:'10px 12px',fontFamily:'monospace',color:'#9A9A9A',fontSize:11}}>{item.id}</td>
-                <td style={{padding:'10px 12px'}}><div style={{fontWeight:600}}>{item.nombre_aliado}</div><div style={{fontSize:11,color:'#9A9A9A'}}>{item.razon_social}</div></td>
-                <td style={{padding:'10px 12px',fontFamily:'monospace',fontSize:11,color:'#5A5A5A'}}>{item.rif}</td>
-                <td style={{padding:'10px 12px',fontSize:12,color:'#5A5A5A'}}>{sol}</td>
-                <td style={{padding:'10px 12px',fontSize:11,color:'#5A5A5A'}}>{item.canal_venta||'—'}</td>
-                <td style={{padding:'10px 12px',fontWeight:700,fontSize:13,color:dColor}}>{ds!==null?ds+'d':'—'}</td>
-                <td style={{padding:'10px 12px',fontSize:12,color:'#5A5A5A'}}>{dp!==null?dp+'d':'—'}</td>
-                <td style={{padding:'10px 12px',fontSize:11,color:'#5A5A5A',maxWidth:180,whiteSpace:'pre-wrap'}}>{item.comentarios||'—'}</td>
-                {showBlocked && <td style={{padding:'10px 12px',fontSize:11,color:'#DC2626'}}>{item.razon_bloqueo||'—'}</td>}
+              <tr key={item.id} style={{borderBottom:'1px solid #EBEBEB',cursor:'pointer',background:isSel?'#FEFCE8':'#fff',transition:'background .1s'}}>
+                {showSelect && <td style={{padding:'10px 12px'}} onClick={e=>e.stopPropagation()}><input type="checkbox" checked={isSel} onChange={()=>toggle(item.id)} style={{cursor:'pointer'}}/></td>}
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontFamily:'monospace',color:'#9A9A9A',fontSize:11}}>{item.id}</td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px'}}><div style={{fontWeight:600}}>{item.nombre_aliado}</div><div style={{fontSize:11,color:'#9A9A9A'}}>{item.razon_social}</div></td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontFamily:'monospace',fontSize:11,color:'#5A5A5A'}}>{item.rif}</td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontSize:12,color:'#5A5A5A'}}>{sol}</td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontSize:11,color:'#5A5A5A'}}>{item.canal_venta||'—'}</td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontWeight:700,fontSize:13,color:dColor}}>{ds!==null?ds+'d':'—'}</td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontSize:12,color:'#5A5A5A'}}>{dp!==null?dp+'d':'—'}</td>
+                <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontSize:11,color:'#5A5A5A',maxWidth:180,whiteSpace:'pre-wrap'}}>{item.comentarios||'—'}</td>
+                {showBlocked && <td onClick={()=>onSelect(item.id)} style={{padding:'10px 12px',fontSize:11,color:'#DC2626'}}>{item.razon_bloqueo||'—'}</td>}
               </tr>
             )
           })}
@@ -672,34 +814,37 @@ function MencionesView({items,onSelect}:{items:Solicitud[],onSelect:(id:string)=
   )
 }
 
-function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidencia,incidencias,onMarcarCorregida}:{
+function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidencia,onEditar,canEditar,incidencias,onMarcarCorregida,canMarcar}:{
   item:Solicitud,role:Rol,onClose:()=>void,
   onAdvance:(id:string,e:Etapa)=>void,
   onBloquear:(id:string)=>void,
   onNota:(id:string)=>void,
   onIncidencia:(id:string)=>void,
+  onEditar:(id:string)=>void,
+  canEditar:boolean,
   incidencias:Incidencia[],
   onMarcarCorregida:(id:number)=>void,
+  canMarcar:boolean,
 }) {
   const st = STAGES.find(s=>s.id===item.etapa_actual)||STAGES[0]
   const days = stageAge(item)
   const notas = (item.notas_seguimiento||'').trim().split('\n').filter(Boolean)
 
   function getNextAction() {
-    const s = item.etapa_actual; const r = role
-    const bloqBtn = (
+    const s = item.etapa_actual
+    if (s==='Solicitud resuelta') return <div style={btnStyle('success')}>✓ Proceso completado</div>
+    if (s==='Bloqueado') return <div style={{...btnStyle('danger'),cursor:'default',opacity:.8}}>🚫 {item.razon_bloqueo}</div>
+    const puedeActuar = canActOnStage(role, s)
+    const bloqBtn = puedeActuar ? (
       <button onClick={()=>onBloquear(item.id)} style={btnStyle('danger')}>
         🚫 <div><div>Marcar como bloqueada</div><div style={{fontSize:10,opacity:.7,marginTop:2}}>Selecciona la razón</div></div>
       </button>
-    )
-    if (s==='Solicitud resuelta') return <div style={btnStyle('success')}>✓ Proceso completado</div>
-    if (s==='Bloqueado') return <div style={{...btnStyle('danger'),cursor:'default',opacity:.8}}>🚫 {item.razon_bloqueo}</div>
-    if (r==='Legal'&&s==='Nuevo') return <>{<button onClick={()=>onAdvance(item.id,'Enviando contrato')} style={btnStyle('primary')}>→ Mover a Enviando contrato</button>}{bloqBtn}</>
-    if (r==='Legal'&&s==='Enviando contrato') return <>{<button onClick={()=>onAdvance(item.id,'Firma de contrato')} style={btnStyle('primary')}>✍ Mover a Firma de contrato</button>}{bloqBtn}</>
-    if (r==='Legal'&&s==='Firma de contrato') return <>{<button onClick={()=>onAdvance(item.id,'Revision de Entidad Legal en ABM')} style={btnStyle('primary')}>→ Contratos firmados, pasar a MI</button>}{bloqBtn}</>
-    if (r==='MI'&&s==='Revision de Entidad Legal en ABM') return <>{<button onClick={()=>onAdvance(item.id,'Configuracion de ODOO')} style={btnStyle('primary')}>→ Entidad validada, pasar a Activaciones</button>}{bloqBtn}</>
-    if (r==='Activaciones'&&s==='Configuracion de ODOO') return <>{<button onClick={()=>onAdvance(item.id,'Solicitud resuelta')} style={btnStyle('primary')}>🚀 Marcar como resuelta</button>}{bloqBtn}</>
-    return <>{<div style={{...btnStyle('default'),cursor:'default',opacity:.5}}>⏳ Sin acción requerida ahora</div>}{bloqBtn}</>
+    ) : null
+    const next = NEXT_STAGE[s]
+    if (puedeActuar && next) {
+      return <>{<button onClick={()=>onAdvance(item.id,next)} style={btnStyle('primary')}>{ADVANCE_LABEL[s] || ('→ Mover a '+stageLabel(next))}</button>}{bloqBtn}</>
+    }
+    return <>{<div style={{...btnStyle('default'),cursor:'default',opacity:.5}}>⏳ Sin acción para tu rol en esta etapa</div>}{bloqBtn}</>
   }
 
   return (
@@ -711,7 +856,14 @@ function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidenci
             <div style={{fontWeight:700,fontSize:16}}>{item.nombre_aliado}</div>
             <div style={{fontSize:12,color:'#9A9A9A',marginTop:2}}>{item.id} · {item.razon_social}</div>
           </div>
-          <button onClick={onClose} style={{width:28,height:28,borderRadius:8,border:'1px solid #EBEBEB',background:'transparent',cursor:'pointer',fontSize:14,display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            {canEditar && (
+              <button onClick={()=>onEditar(item.id)} style={{padding:'5px 12px',borderRadius:20,border:'1.5px solid #EBEBEB',background:'transparent',cursor:'pointer',fontSize:12,fontWeight:600}}>
+                ✎ Editar
+              </button>
+            )}
+            <button onClick={onClose} style={{width:28,height:28,borderRadius:8,border:'1px solid #EBEBEB',background:'transparent',cursor:'pointer',fontSize:14,display:'flex',alignItems:'center',justifyContent:'center'}}>✕</button>
+          </div>
         </div>
         <div style={{padding:20,display:'flex',flexDirection:'column',gap:20}}>
           {/* Estado actual */}
@@ -750,7 +902,7 @@ function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidenci
                     {done ? '✓' : i+1}
                   </div>
                   <div>
-                    <div style={{fontSize:13,fontWeight:500,color:(!done&&!curr)?'#9A9A9A':'#0A0A0A'}}>{s}</div>
+                    <div style={{fontSize:13,fontWeight:500,color:(!done&&!curr)?'#9A9A9A':'#0A0A0A'}}>{stageLabel(s)}</div>
                     <div style={{fontSize:11,color:'#9A9A9A',marginTop:1}}>{ts||'—'}</div>
                   </div>
                 </div>
@@ -793,7 +945,7 @@ function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidenci
                     <span>Reportó: {inc.equipo_reporta}</span>
                     <span>{inc.fecha_incidencia}</span>
                   </div>
-                  {inc.estado === 'Activa' && (
+                  {inc.estado === 'Activa' && canMarcar && (
                     <button onClick={()=>onMarcarCorregida(inc.id!)} style={{marginTop:6,fontSize:11,padding:'3px 10px',borderRadius:20,border:'1.5px solid #16A34A',background:'transparent',color:'#16A34A',cursor:'pointer',fontWeight:600}}>
                       Marcar como corregida
                     </button>
@@ -903,6 +1055,51 @@ function FormModal({user,existing,onSubmit,onClose}:{user:UsuarioAutorizado,exis
       <Field label="Tiendas *" error={errors.tiendas} hint="ID - Nombre tal como aparece en el ABM. Una tienda por línea."><textarea placeholder={"23852 - Farmacia La Bonita, La Paz\n10045 - Tienda Nombre, Ciudad"} value={f.tiendas||''} onChange={e=>setF({...f,tiendas:e.target.value})} style={{...inputStyle,minHeight:70,resize:'vertical'}}/></Field>
       <Field label="Motivo del cambio *"><select value={f.motivo_cambio||''} onChange={e=>setF({...f,motivo_cambio:e.target.value})} style={inputStyle}><option value="">—</option>{['Mejora de liquidez del aliado','Solicitud comercial','Renegociacion de contrato','Otro'].map(m=><option key={m}>{m}</option>)}</select></Field>
       <Field label="Comentarios"><textarea placeholder="Contexto relevante..." value={f.comentarios||''} onChange={e=>setF({...f,comentarios:e.target.value})} style={{...inputStyle,minHeight:60,resize:'vertical'}}/></Field>
+    </Modal>
+  )
+}
+
+function EditModal({item,onSubmit,onClose}:{item:Solicitud,onSubmit:(f:Partial<Solicitud>)=>void,onClose:()=>void}) {
+  const [f, setF] = useState<Partial<Solicitud>>({
+    nombre_aliado:item.nombre_aliado, razon_social:item.razon_social, rif:item.rif,
+    tier:item.tier, orden:item.orden, lending_fee:item.lending_fee, canal_venta:item.canal_venta,
+    tiendas:item.tiendas, motivo_cambio:item.motivo_cambio, comentarios:item.comentarios,
+  })
+  const [errors, setErrors] = useState<Record<string,string>>({})
+
+  function validate() {
+    const e:Record<string,string> = {}
+    if (!f.nombre_aliado) e.nombre_aliado = 'Requerido'
+    if (!f.razon_social) e.razon_social = 'Requerido'
+    if (!f.rif || !/^[VJE]-\d{8,9}$/.test(f.rif)) e.rif = 'Formato inválido (Ej: J-12345678)'
+    if (!f.tiendas) e.tiendas = 'Requerido'
+    const lines = (f.tiendas||'').split('\n').filter(Boolean)
+    if (lines.some(l => !/^\d{3,6}\s+-\s+.+/.test(l))) e.tiendas = 'Formato: ID - Nombre (una tienda por línea)'
+    setErrors(e)
+    return Object.keys(e).length === 0
+  }
+
+  return (
+    <Modal title={`Editar solicitud ${item.id}`} onClose={onClose} onSubmit={()=>validate()&&onSubmit(f)} submitLabel="Guardar cambios">
+      <div style={{fontSize:12,color:'#5A5A5A',background:'#F5F5F5',borderRadius:10,padding:'10px 14px',border:'1px solid #EBEBEB',lineHeight:1.5}}>
+        Actualiza los datos para que el siguiente equipo tenga la información clara. La etapa y el solicitante no cambian aquí.
+      </div>
+      <Row2>
+        <Field label="Nombre del aliado *" error={errors.nombre_aliado}><input value={f.nombre_aliado||''} onChange={e=>setF({...f,nombre_aliado:e.target.value})} style={inputStyle}/></Field>
+        <Field label="Razón social *" error={errors.razon_social}><input value={f.razon_social||''} onChange={e=>setF({...f,razon_social:e.target.value})} style={inputStyle}/></Field>
+      </Row2>
+      <Row2>
+        <Field label="RIF *" error={errors.rif} hint="V, J o E + guión + 8 o 9 dígitos"><input value={f.rif||''} onChange={e=>setF({...f,rif:e.target.value})} style={inputStyle}/></Field>
+        <Field label="Tier"><select value={f.tier||''} onChange={e=>setF({...f,tier:e.target.value})} style={inputStyle}><option value="">—</option>{['Tier 1','Tier 2','Tier 3','Tier 4'].map(t=><option key={t}>{t}</option>)}</select></Field>
+      </Row2>
+      <Row2>
+        <Field label="Tipo de línea"><select value={f.orden||''} onChange={e=>setF({...f,orden:e.target.value})} style={inputStyle}><option value="">—</option>{['LP','LC','Ambas'].map(o=><option key={o}>{o}</option>)}</select></Field>
+        <Field label="% Lending fee"><input type="number" step="0.1" value={f.lending_fee||''} onChange={e=>setF({...f,lending_fee:e.target.value})} style={inputStyle}/></Field>
+      </Row2>
+      <Field label="Canal de venta"><select value={f.canal_venta||''} onChange={e=>setF({...f,canal_venta:e.target.value})} style={inputStyle}><option value="">—</option>{['Marketplace','Marketplace + MMC','Boton de pago','Solo tienda fisica'].map(c=><option key={c}>{c}</option>)}</select></Field>
+      <Field label="Tiendas *" error={errors.tiendas} hint="ID - Nombre tal como aparece en el ABM. Una tienda por línea."><textarea value={f.tiendas||''} onChange={e=>setF({...f,tiendas:e.target.value})} style={{...inputStyle,minHeight:70,resize:'vertical'}}/></Field>
+      <Field label="Motivo del cambio"><select value={f.motivo_cambio||''} onChange={e=>setF({...f,motivo_cambio:e.target.value})} style={inputStyle}><option value="">—</option>{['Mejora de liquidez del aliado','Solicitud comercial','Renegociacion de contrato','Otro'].map(m=><option key={m}>{m}</option>)}</select></Field>
+      <Field label="Comentarios"><textarea value={f.comentarios||''} onChange={e=>setF({...f,comentarios:e.target.value})} style={{...inputStyle,minHeight:60,resize:'vertical'}}/></Field>
     </Modal>
   )
 }
@@ -1157,7 +1354,7 @@ function MetricasView({data, incidencias}:{data:Solicitud[], incidencias:Inciden
   )
 }
 
-function IncidenciasView({incidencias,data,onMarcarCorregida}:{incidencias:Incidencia[],data:Solicitud[],onMarcarCorregida:(id:number)=>void}) {
+function IncidenciasView({incidencias,data,onMarcarCorregida,canMarcar}:{incidencias:Incidencia[],data:Solicitud[],onMarcarCorregida:(id:number)=>void,canMarcar:boolean}) {
   const activas = incidencias.filter(i=>i.estado==='Activa')
   const corregidas = incidencias.filter(i=>i.estado==='Corregida')
   const resueltas = data.filter(d=>d.etapa_actual==='Solicitud resuelta')
@@ -1241,9 +1438,11 @@ function IncidenciasView({incidencias,data,onMarcarCorregida}:{incidencias:Incid
                     <td style={{padding:'8px 10px',fontSize:11,color:'#5A5A5A'}}>{inc.equipo_reporta}</td>
                     <td style={{padding:'8px 10px',fontSize:11,color:'#9A9A9A',fontFamily:'monospace'}}>{inc.fecha_incidencia}</td>
                     <td style={{padding:'8px 10px'}}>
-                      <button onClick={()=>onMarcarCorregida(inc.id!)} style={{fontSize:11,padding:'3px 10px',borderRadius:20,border:'1.5px solid #16A34A',background:'transparent',color:'#16A34A',cursor:'pointer',fontWeight:600}}>
-                        Corregida ✓
-                      </button>
+                      {canMarcar ? (
+                        <button onClick={()=>onMarcarCorregida(inc.id!)} style={{fontSize:11,padding:'3px 10px',borderRadius:20,border:'1.5px solid #16A34A',background:'transparent',color:'#16A34A',cursor:'pointer',fontWeight:600}}>
+                          Corregida ✓
+                        </button>
+                      ) : <span style={{fontSize:11,color:'#9A9A9A'}}>—</span>}
                     </td>
                   </tr>
                 )
