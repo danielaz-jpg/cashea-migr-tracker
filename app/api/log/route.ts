@@ -28,8 +28,9 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const callerEmail = req.nextUrl.searchParams.get('callerEmail') || ''
   const { data: caller } = await supabaseAdmin
-    .from('usuarios_autorizados').select('es_admin').eq('email', callerEmail.toLowerCase()).single()
-  if (!caller?.es_admin) {
+    .from('usuarios_autorizados').select('es_admin, equipo').eq('email', callerEmail.toLowerCase()).single()
+  // Visible para cualquier rol asignado; el rol base 'Usuario' (pendiente) no, salvo que sea admin
+  if (!caller || (caller.equipo === 'Usuario' && !caller.es_admin)) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 403 })
   }
 

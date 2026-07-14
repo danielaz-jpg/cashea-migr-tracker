@@ -211,7 +211,7 @@ export default function Home() {
     else showToast('Error al cargar usuarios: ' + json.error, true)
   }
   async function loadLogs() {
-    if (!currentUser?.es_admin) return
+    if (!currentUser || (role === 'Usuario' && !currentUser.es_admin)) return
     const res = await fetch(`/api/log?callerEmail=${encodeURIComponent(currentUser.email)}`)
     const json = await res.json()
     if (res.ok) setLogs(json.logs as AuditLog[])
@@ -635,11 +635,13 @@ export default function Home() {
             Métricas
           </NavItem>
 
-          {currentUser.es_admin && (<>
+          {(currentUser.es_admin || role !== 'Usuario') && (<>
             <div style={{fontSize:10,color:'#9A9A9A',letterSpacing:'.08em',textTransform:'uppercase',padding:'8px 8px 4px',fontWeight:600,marginTop:6}}>Administración</div>
-            <NavItem active={view==='usuarios'} onClick={()=>setView('usuarios')}>
-              Usuarios y permisos
-            </NavItem>
+            {currentUser.es_admin && (
+              <NavItem active={view==='usuarios'} onClick={()=>setView('usuarios')}>
+                Usuarios y permisos
+              </NavItem>
+            )}
             <NavItem active={view==='auditoria'} onClick={()=>setView('auditoria')}>
               Auditoría
             </NavItem>
