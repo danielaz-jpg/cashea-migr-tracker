@@ -106,6 +106,18 @@ function genId(existing: Solicitud[]) {
   return `MIG-${String(next).padStart(3,'0')}`
 }
 function stageLabel(id: string) { return STAGES.find(s => s.id === id)?.label ?? id }
+// Etapa a la que vuelve una solicitud al desbloquear/reabrir: la última etapa con timestamp registrado
+function reopenStage(item: Solicitud): Etapa {
+  const order: [keyof Solicitud, Etapa][] = [
+    ['ts_odoo_configurado','Configuracion de ODOO'],
+    ['ts_entidad_validada','Revision de Entidad Legal en ABM'],
+    ['ts_contrato_firmado','Firma de contrato'],
+    ['ts_contrato_enviado','Enviando contrato'],
+    ['ts_nuevo','Nuevo'],
+  ]
+  for (const [k, stage] of order) if (item[k]) return stage
+  return 'Nuevo'
+}
 
 // ── Permisos (guardarraíles de UI) ──────────────────────────────
 function isAdminRole(r: Rol) { return r === 'MI' || r === 'Todos' }
@@ -294,6 +306,27 @@ export default function Home() {
     showToast(`${updates.nombre_aliado} actualizada`)
   }
 
+  // ── Desbloquear / Reabrir (solo MI/admin) ──
+  async function reopen(id: string) {
+    const item = data.find(d => d.id === id)
+    if (!item) return
+    if (!isAdminRole(role)) { showToast('Solo MI puede desbloquear o reabrir', true); return }
+    const esBloqueo = item.etapa_actual === 'Bloqueado'
+    const target: Etapa = esBloqueo ? reopenStage(item) : 'Configuracion de ODOO'
+    const fecha = today()
+    const accion = esBloqueo ? 'desbloqueada' : 'reabierta'
+    const autoNota = `[${fecha} | MI] Solicitud ${accion} → ${stageLabel(target)}.`
+    const nuevaNotas = item.notas_seguimiento ? item.notas_seguimiento + '\n' + autoNota : autoNota
+    const updates: any = { etapa_actual: target, notas_seguimiento: nuevaNotas }
+    if (esBloqueo) updates.razon_bloqueo = ''
+    if (!esBloqueo) updates.ts_resuelto = null
+    const { error } = await supabase.from('solicitudes').update(updates).eq('id', id)
+    if (error) { showToast('Error: ' + error.message, true); return }
+    setData(prev => prev.map(d => d.id === id ? {...d, ...updates} : d))
+    setSelectedId(null)
+    showToast(`${item.nombre_aliado} ${accion} → ${stageLabel(target)}`)
+  }
+
   // ── Bloquear ──
   async function confirmBloqueo(razon: string, comentario: string) {
     const item = data.find(d => d.id === bloqTargetId)
@@ -390,21 +423,25 @@ export default function Home() {
     const ok = csvRows.filter(r => r.errors.length === 0 && !r.isDuplicate)
     const dups = csvRows.filter(r => r.isDuplicate)
     const hoy = today()
+    // IDs incrementales: cada fila toma el siguiente número disponible (evita IDs duplicados en importación masiva)
+    const nums = data.map(s => parseInt(s.id.replace('MIG-','')||'0')).filter(Boolean)
+    let nextNum = nums.length ? Math.max(...nums) + 1 : 1
+    const nextId = () => `MIG-${String(nextNum++).padStart(3,'0')}`
     const toInsert = [
-      ...ok.map(r => ({ id:genId([...data]), nombre_aliado:r.nombre_aliado, rif:r.rif,
+      ...ok.map(r => ({ id:nextId(), nombre_aliado:r.nombre_aliado, rif:r.rif,
         razon_social:r.razon_social, tier:r.tier, orden:r.orden, lending_fee:r.lending_fee,
         canal_venta:r.canal_venta, tiendas:r.tiendas, motivo_cambio:r.motivo_cambio,
         comentarios:r.comentarios, solicitante:currentUser?.email??'',
         etapa_actual:'Nuevo' as Etapa, razon_bloqueo:'', ts_nuevo:hoy,
         ts_contrato_enviado:null, ts_contrato_firmado:null, ts_entidad_validada:null,
         ts_odoo_configurado:null, ts_resuelto:null, notas_seguimiento:'' })),
-      ...dups.map(r => ({ id:genId([...data]), nombre_aliado:r.nombre_aliado, rif:r.rif,
+      ...dups.map(r => ({ id:nextId(), nombre_aliado:r.nombre_aliado, rif:r.rif,
         razon_social:r.razon_social, tier:r.tier, orden:r.orden, lending_fee:r.lending_fee,
         canal_venta:r.canal_venta, tiendas:r.tiendas, motivo_cambio:r.motivo_cambio,
         comentarios:r.comentarios, solicitante:currentUser?.email??'',
         etapa_actual:'Bloqueado' as Etapa, razon_bloqueo:'Ticket duplicado - '+r.dupReason,
         ts_nuevo:hoy, ts_contrato_enviado:null, ts_contrato_firmado:null,
-        ts_entidad_validada:null, ts_odoo_coordinado:null, ts_resuelto:null, notas_seguimiento:'' })),
+        ts_entidad_validada:null, ts_odoo_configurado:null, ts_resuelto:null, notas_seguimiento:'' })),
     ]
     const res = await fetch('/api/importar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({solicitudes:toInsert}) })
     const json = await res.json()
@@ -614,6 +651,8 @@ export default function Home() {
           onIncidencia={id=>{setIncidenciaTargetId(id);setShowIncidenciaModal(true)}}
           onEditar={id=>{setEditTargetId(id);setShowEditModal(true)}}
           canEditar={canEditData(role, selected.etapa_actual)}
+          onReopen={reopen}
+          canReopen={isAdminRole(role)}
           incidencias={incidencias.filter(i=>i.solicitud_id===selected.id)}
           onMarcarCorregida={marcarCorregida}
           canMarcar={CAN_MARCAR.includes(role)}
@@ -814,7 +853,7 @@ function MencionesView({items,onSelect}:{items:Solicitud[],onSelect:(id:string)=
   )
 }
 
-function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidencia,onEditar,canEditar,incidencias,onMarcarCorregida,canMarcar}:{
+function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidencia,onEditar,canEditar,onReopen,canReopen,incidencias,onMarcarCorregida,canMarcar}:{
   item:Solicitud,role:Rol,onClose:()=>void,
   onAdvance:(id:string,e:Etapa)=>void,
   onBloquear:(id:string)=>void,
@@ -822,6 +861,8 @@ function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidenci
   onIncidencia:(id:string)=>void,
   onEditar:(id:string)=>void,
   canEditar:boolean,
+  onReopen:(id:string)=>void,
+  canReopen:boolean,
   incidencias:Incidencia[],
   onMarcarCorregida:(id:number)=>void,
   canMarcar:boolean,
@@ -832,8 +873,14 @@ function DetailDrawer({item,role,onClose,onAdvance,onBloquear,onNota,onIncidenci
 
   function getNextAction() {
     const s = item.etapa_actual
-    if (s==='Solicitud resuelta') return <div style={btnStyle('success')}>✓ Proceso completado</div>
-    if (s==='Bloqueado') return <div style={{...btnStyle('danger'),cursor:'default',opacity:.8}}>🚫 {item.razon_bloqueo}</div>
+    if (s==='Solicitud resuelta') return <>
+      <div style={btnStyle('success')}>✓ Proceso completado</div>
+      {canReopen && <button onClick={()=>onReopen(item.id)} style={btnStyle('default')}>↩ Reabrir solicitud</button>}
+    </>
+    if (s==='Bloqueado') return <>
+      <div style={{...btnStyle('danger'),cursor:'default',opacity:.8}}>🚫 {item.razon_bloqueo}</div>
+      {canReopen && <button onClick={()=>onReopen(item.id)} style={btnStyle('primary')}>↩ Desbloquear solicitud</button>}
+    </>
     const puedeActuar = canActOnStage(role, s)
     const bloqBtn = puedeActuar ? (
       <button onClick={()=>onBloquear(item.id)} style={btnStyle('danger')}>
