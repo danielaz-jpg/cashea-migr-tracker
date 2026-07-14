@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
-import { Solicitud, Rol, UsuarioAutorizado, Etapa, Incidencia } from '@/lib/types'
+import { Solicitud, Rol, UsuarioAutorizado, Etapa, Incidencia, AuditLog } from '@/lib/types'
 
 // ── Constantes ──────────────────────────────────────────────────
 const STAGES = [
@@ -18,6 +18,7 @@ const STAGES = [
 // Etapas sobre las que cada rol puede ACTUAR (mover / editar / bloquear).
 // MI y Todos son admin: actúan sobre todo (ver helpers isAdminRole / canActOnStage).
 const OWNER_STAGES: Record<Rol, string[]> = {
+  Usuario:      [],
   Legal:        ['Nuevo','Enviando contrato','Firma de contrato'],
   MI:           [],
   Activaciones: ['Configuracion de ODOO'],
@@ -77,7 +78,14 @@ const CATEGORIAS_INCIDENCIA = [
 ]
 
 // ── Helpers ─────────────────────────────────────────────────────
-function today() { return new Date().toISOString().slice(0, 10) }
+// Todas las fechas/horas de la app se registran en zona horaria de Venezuela.
+const TZ = 'America/Caracas'
+function today() { return new Date().toLocaleDateString('en-CA', { timeZone: TZ }) } // YYYY-MM-DD (Venezuela)
+function nowLocal() { return new Date().toLocaleString('sv-SE', { timeZone: TZ }) }   // YYYY-MM-DD HH:mm:ss (Venezuela)
+function shiftDays(dateStr: string, n: number) {
+  const d = new Date(dateStr + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
+}
 function daysBetween(a: string, b: string) {
   if (!a || !b) return null
   return Math.floor((new Date(b).getTime() - new Date(a).getTime()) / 86400000)
@@ -154,7 +162,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true)
   const [currentUser, setCurrentUser] = useState<UsuarioAutorizado|null>(null)
   const [role, setRole] = useState<Rol>('Todos')
-  const [view, setView] = useState<'kanban'|'list'|'menciones'|'incidencias'|'metricas'>('kanban')
+  const [view, setView] = useState<'kanban'|'list'|'menciones'|'incidencias'|'metricas'|'usuarios'|'auditoria'>('kanban')
   const [filterMode, setFilterMode] = useState('todos')
   const [stageFilter, setStageFilter] = useState<string|null>(null)
   const [solFilter, setSolFilter] = useState('')
@@ -177,11 +185,46 @@ export default function Home() {
   const [lastCsvHash, setLastCsvHash] = useState('')
   const [showEditModal, setShowEditModal] = useState(false)
   const [editTargetId, setEditTargetId] = useState<string|null>(null)
+  const [usuarios, setUsuarios] = useState<UsuarioAutorizado[]>([])
+  const [logs, setLogs] = useState<AuditLog[]>([])
 
   // ── Toast ──
   function showToast(msg: string, err = false) {
     setToast({msg,err})
     setTimeout(() => setToast(null), 3500)
+  }
+
+  // ── Auditoría (registro de eventos, best-effort) ──
+  async function logAction(entry: {accion:string, solicitud_id?:string|null, etapa_anterior?:string|null, etapa_nueva?:string|null, detalle?:string}) {
+    try {
+      await fetch('/api/log', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ ...entry, usuario_email: currentUser?.email ?? '', usuario_rol: role, ts_local: nowLocal() }) })
+    } catch {}
+  }
+
+  // ── Gestión de usuarios (solo admin) ──
+  async function loadUsuarios() {
+    if (!currentUser?.es_admin) return
+    const res = await fetch(`/api/usuarios?callerEmail=${encodeURIComponent(currentUser.email)}`)
+    const json = await res.json()
+    if (res.ok) setUsuarios(json.usuarios as UsuarioAutorizado[])
+    else showToast('Error al cargar usuarios: ' + json.error, true)
+  }
+  async function loadLogs() {
+    if (!currentUser?.es_admin) return
+    const res = await fetch(`/api/log?callerEmail=${encodeURIComponent(currentUser.email)}`)
+    const json = await res.json()
+    if (res.ok) setLogs(json.logs as AuditLog[])
+    else showToast('Error al cargar auditoría: ' + json.error, true)
+  }
+  async function updateUsuario(targetId: number, patch: {equipo?: Rol, activo?: boolean, es_admin?: boolean}) {
+    if (!currentUser?.es_admin) return
+    const res = await fetch('/api/usuarios', { method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ callerEmail: currentUser.email, targetId, ...patch, tsLocal: nowLocal() }) })
+    const json = await res.json()
+    if (!res.ok) { showToast('Error: ' + json.error, true); return }
+    setUsuarios(prev => prev.map(u => u.id === targetId ? (json.usuario as UsuarioAutorizado) : u))
+    showToast('Usuario actualizado')
   }
 
   // ── Auth ──
@@ -211,6 +254,13 @@ export default function Home() {
     if (saved) { const u = JSON.parse(saved); setCurrentUser(u); setRole(u.equipo) }
     loadData()
   }, [loadData])
+
+  // Carga diferida de secciones de admin
+  useEffect(() => {
+    if (view === 'usuarios') loadUsuarios()
+    if (view === 'auditoria') loadLogs()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, currentUser])
 
   // ── Incidencias ──
   async function submitIncidencia(categoria: string, descripcion: string, equipoReporta: string) {
@@ -242,13 +292,14 @@ export default function Home() {
   }
 
   // ── Filtros ── (todos los roles ven el pipeline completo; los permisos gatean acciones)
+  // Comparaciones por fecha calendario de Venezuela (America/Caracas)
   function getFiltered() {
     let items = data.slice()
     if (solFilter) items = items.filter(d => d.solicitante === solFilter)
-    const now = new Date()
-    if (filterMode === 'hoy') { const h = new Date(); h.setHours(0,0,0,0); items = items.filter(d => new Date(d.ts_nuevo) >= h) }
-    else if (filterMode === 'semana') { const w = new Date(); w.setDate(w.getDate()-7); items = items.filter(d => new Date(d.ts_nuevo) >= w) }
-    else if (filterMode === 'mes') { const m = new Date(now.getFullYear(),now.getMonth(),1); items = items.filter(d => new Date(d.ts_nuevo) >= m) }
+    const hoy = today()
+    if (filterMode === 'hoy') { items = items.filter(d => (d.ts_nuevo||'') >= hoy) }
+    else if (filterMode === 'semana') { const w = shiftDays(hoy,-7); items = items.filter(d => (d.ts_nuevo||'') >= w) }
+    else if (filterMode === 'mes') { const m = hoy.slice(0,7)+'-01'; items = items.filter(d => (d.ts_nuevo||'') >= m) }
     else if (filterMode === 'stage' && stageFilter) items = items.filter(d => d.etapa_actual === stageFilter)
     return items
   }
@@ -264,6 +315,7 @@ export default function Home() {
     const { error } = await supabase.from('solicitudes').update(updates).eq('id', id)
     if (error) { showToast('Error al actualizar: ' + error.message, true); return }
     setData(prev => prev.map(d => d.id === id ? {...d, ...updates} : d))
+    logAction({ accion:'mover_etapa', solicitud_id:id, etapa_anterior:item.etapa_actual, etapa_nueva:newStage })
     setSelectedId(null)
     showToast(`${item.nombre_aliado} → ${stageLabel(newStage)}`)
   }
@@ -279,6 +331,7 @@ export default function Home() {
     const { error } = await supabase.from('solicitudes').update(updates).in('id', ids)
     if (error) { showToast('Error al actualizar: ' + error.message, true); return }
     setData(prev => prev.map(d => ids.includes(d.id) ? {...d, ...updates} : d))
+    ids.forEach(id => logAction({ accion:'mover_masivo', solicitud_id:id, etapa_anterior:fromStage, etapa_nueva:newStage }))
     showToast(`${ids.length} solicitud${ids.length>1?'es':''} → ${stageLabel(newStage)}`)
   }
 
@@ -301,7 +354,9 @@ export default function Home() {
     }
     const { error } = await supabase.from('solicitudes').update(updates).eq('id', editTargetId!)
     if (error) { showToast('Error al editar: ' + error.message, true); return }
+    const cambios = Object.keys(updates).filter(k => (updates as any)[k] !== (item as any)[k])
     setData(prev => prev.map(d => d.id === editTargetId ? {...d, ...updates} : d))
+    logAction({ accion:'editar_solicitud', solicitud_id:editTargetId, detalle: cambios.length ? 'Campos: '+cambios.join(', ') : 'Sin cambios' })
     setShowEditModal(false); setEditTargetId(null)
     showToast(`${updates.nombre_aliado} actualizada`)
   }
@@ -323,6 +378,7 @@ export default function Home() {
     const { error } = await supabase.from('solicitudes').update(updates).eq('id', id)
     if (error) { showToast('Error: ' + error.message, true); return }
     setData(prev => prev.map(d => d.id === id ? {...d, ...updates} : d))
+    logAction({ accion: esBloqueo ? 'desbloquear' : 'reabrir', solicitud_id:id, etapa_anterior:item.etapa_actual, etapa_nueva:target })
     setSelectedId(null)
     showToast(`${item.nombre_aliado} ${accion} → ${stageLabel(target)}`)
   }
@@ -341,6 +397,7 @@ export default function Home() {
     }).eq('id', bloqTargetId!)
     if (error) { showToast('Error: ' + error.message, true); return }
     setData(prev => prev.map(d => d.id === bloqTargetId ? {...d, etapa_actual:'Bloqueado', razon_bloqueo:razonFinal, notas_seguimiento:nuevaNotas} : d))
+    logAction({ accion:'bloquear', solicitud_id:item.id, etapa_anterior:item.etapa_actual, etapa_nueva:'Bloqueado', detalle:razonFinal })
     setShowBloqModal(false); setSelectedId(null)
     showToast(`${item.nombre_aliado} bloqueada`)
   }
@@ -378,6 +435,7 @@ export default function Home() {
     const { error } = await supabase.from('solicitudes').insert(nueva)
     if (error) { showToast('Error: ' + error.message, true); return }
     setData(prev => [nueva, ...prev])
+    logAction({ accion:'crear_solicitud', solicitud_id:id, etapa_nueva:'Nuevo', detalle:`${nueva.nombre_aliado} (${nueva.rif})` })
     setShowForm(false)
     showToast(`Solicitud ${id} creada`)
   }
@@ -577,6 +635,16 @@ export default function Home() {
             Métricas
           </NavItem>
 
+          {currentUser.es_admin && (<>
+            <div style={{fontSize:10,color:'#9A9A9A',letterSpacing:'.08em',textTransform:'uppercase',padding:'8px 8px 4px',fontWeight:600,marginTop:6}}>Administración</div>
+            <NavItem active={view==='usuarios'} onClick={()=>setView('usuarios')}>
+              Usuarios y permisos
+            </NavItem>
+            <NavItem active={view==='auditoria'} onClick={()=>setView('auditoria')}>
+              Auditoría
+            </NavItem>
+          </>)}
+
           <div style={{fontSize:10,color:'#9A9A9A',letterSpacing:'.08em',textTransform:'uppercase',padding:'8px 8px 4px',fontWeight:600,marginTop:6}}>Etapas</div>
           {STAGES.map(s => (
             <NavItem key={s.id} active={stageFilter===s.id} onClick={()=>{setStageFilter(s.id);setFilterMode('stage');setView('list')}}>
@@ -593,14 +661,16 @@ export default function Home() {
           <div style={{padding:'12px 20px',borderBottom:'1px solid #EBEBEB',display:'flex',alignItems:'center',gap:10,background:'#fff',flexWrap:'wrap'}}>
             <div>
               <div style={{fontWeight:700,fontSize:15}}>
-                {view==='menciones' ? 'Mis menciones' : stageFilter ? STAGES.find(s=>s.id===stageFilter)?.label : 'Pipeline completo'}
+                {view==='menciones' ? 'Mis menciones' : view==='usuarios' ? 'Usuarios y permisos' : view==='auditoria' ? 'Auditoría' : stageFilter ? STAGES.find(s=>s.id===stageFilter)?.label : 'Pipeline completo'}
               </div>
               <div style={{fontSize:11,color:'#9A9A9A'}}>
                 {view==='menciones' ? 'Tickets donde fuiste mencionado' :
-                  ({Legal:'Editas: Nuevo → Revisión legal → Pendiente firma',MI:'Vista completa · acceso total',Activaciones:'Editas: Config. ODOO → Resuelta',Comercial:'Vista completa · solo lectura + notas',Todos:'Vista completa · acceso total'} as Record<Rol,string>)[role]}
+                 view==='usuarios' ? 'Asigna roles y accesos a los usuarios de la app' :
+                 view==='auditoria' ? 'Registro de acciones — hora de Venezuela (America/Caracas)' :
+                  ({Usuario:'Cuenta pendiente · solo lectura (sin rol asignado)',Legal:'Editas: Nuevo → Revisión legal → Pendiente firma',MI:'Vista completa · acceso total',Activaciones:'Editas: Config. ODOO → Resuelta',Comercial:'Vista completa · solo lectura + notas',Todos:'Vista completa · acceso total'} as Record<Rol,string>)[role]}
               </div>
             </div>
-            {view !== 'menciones' && (
+            {view !== 'menciones' && view !== 'usuarios' && view !== 'auditoria' && (
               <div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
                 {['todos','hoy','semana','mes'].map(f => (
                   <button key={f} onClick={()=>{setFilterMode(f);setStageFilter(null);setView('kanban')}}
@@ -613,11 +683,13 @@ export default function Home() {
                 ))}
               </div>
             )}
+            {view !== 'usuarios' && view !== 'auditoria' && (
             <select value={solFilter} onChange={e=>setSolFilter(e.target.value)}
               style={{marginLeft:'auto',padding:'5px 10px',borderRadius:20,fontSize:12,border:'1px solid #EBEBEB',background:'transparent',cursor:'pointer',outline:'none'}}>
               <option value="">Todos los solicitantes</option>
               {solicitantes.map(s => <option key={s} value={s}>{s.replace('@cashea.app','')}</option>)}
             </select>
+            )}
           </div>
 
           {/* Main area */}
@@ -625,6 +697,10 @@ export default function Home() {
             <div style={{flex:1,display:'flex',alignItems:'center',justifyContent:'center',color:'#9A9A9A'}}>Cargando...</div>
           ) : view === 'menciones' ? (
             <MencionesView items={menciones} onSelect={setSelectedId} />
+          ) : view === 'usuarios' ? (
+            <UsuariosView usuarios={usuarios} currentUser={currentUser} onUpdate={updateUsuario} onRefresh={loadUsuarios} />
+          ) : view === 'auditoria' ? (
+            <AuditoriaView logs={logs} onRefresh={loadLogs} />
           ) : view === 'metricas' ? (
             <MetricasView data={data} incidencias={incidencias} />
           ) : view === 'incidencias' ? (
@@ -1231,11 +1307,11 @@ function MetricasView({data, incidencias}:{data:Solicitud[], incidencias:Inciden
   function getFiltered() {
     let items = data.slice()
     if (solFilterM) items = items.filter(d=>d.solicitante===solFilterM)
-    const now = new Date()
-    if (metFilter==='hoy') { const h=new Date();h.setHours(0,0,0,0);items=items.filter(d=>new Date(d.ts_nuevo)>=h) }
-    else if (metFilter==='semana') { const w=new Date();w.setDate(w.getDate()-7);items=items.filter(d=>new Date(d.ts_nuevo)>=w) }
-    else if (metFilter==='mes') { const m=new Date(now.getFullYear(),now.getMonth(),1);items=items.filter(d=>new Date(d.ts_nuevo)>=m) }
-    else if (metFilter==='rango'&&desde&&hasta) { const d0=new Date(desde);const d1=new Date(hasta);d1.setHours(23,59,59);items=items.filter(d=>{const t=new Date(d.ts_nuevo);return t>=d0&&t<=d1}) }
+    const hoy = today()
+    if (metFilter==='hoy') { items=items.filter(d=>(d.ts_nuevo||'')>=hoy) }
+    else if (metFilter==='semana') { const w=shiftDays(hoy,-7);items=items.filter(d=>(d.ts_nuevo||'')>=w) }
+    else if (metFilter==='mes') { const m=hoy.slice(0,7)+'-01';items=items.filter(d=>(d.ts_nuevo||'')>=m) }
+    else if (metFilter==='rango'&&desde&&hasta) { items=items.filter(d=>{const t=d.ts_nuevo||'';return t>=desde&&t<=hasta}) }
     return items
   }
 
@@ -1497,6 +1573,122 @@ function IncidenciasView({incidencias,data,onMarcarCorregida,canMarcar}:{inciden
             </tbody>
           </table>}
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Vista: Usuarios y permisos (solo admin) ──────────────────────
+function UsuariosView({usuarios,currentUser,onUpdate,onRefresh}:{
+  usuarios:UsuarioAutorizado[], currentUser:UsuarioAutorizado,
+  onUpdate:(id:number,patch:{equipo?:Rol,activo?:boolean,es_admin?:boolean})=>void,
+  onRefresh:()=>void,
+}) {
+  const ROLES: Rol[] = ['Usuario','Legal','MI','Activaciones','Comercial','Todos']
+  return (
+    <div style={{flex:1,overflowY:'auto',padding:20,background:'#F5F5F5'}}>
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap' as const}}>
+        <div style={{fontSize:12,color:'#5A5A5A',flex:1}}>
+          {usuarios.length} usuario(s). Los nuevos ingresan como <b>Usuario</b> (solo lectura) hasta que les asignes un rol.
+        </div>
+        <button onClick={onRefresh} style={{padding:'6px 12px',borderRadius:20,border:'1.5px solid #EBEBEB',background:'#fff',cursor:'pointer',fontSize:12,fontWeight:600}}>↻ Actualizar</button>
+      </div>
+      <div style={{background:'#fff',borderRadius:14,border:'1px solid #EBEBEB',overflow:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse' as const,fontSize:12}}>
+          <thead><tr style={{borderBottom:'2px solid #EBEBEB'}}>
+            {['Nombre','Correo','Rol','Admin','Activo','Alta'].map(h=>(
+              <th key={h} style={{textAlign:'left' as const,padding:'10px 12px',color:'#9A9A9A',fontSize:10,fontWeight:700,letterSpacing:'.06em',textTransform:'uppercase' as const}}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {usuarios.length===0 ? <tr><td colSpan={6} style={{textAlign:'center' as const,padding:28,color:'#9A9A9A'}}>Sin usuarios</td></tr>
+            : usuarios.map(u=>{
+              const esYo = u.id===currentUser.id
+              return (
+                <tr key={u.id} style={{borderBottom:'1px solid #EBEBEB'}}>
+                  <td style={{padding:'10px 12px',fontWeight:600}}>{u.nombre}{esYo && <span style={{marginLeft:6,fontSize:10,color:'#9A9A9A'}}>(tú)</span>}</td>
+                  <td style={{padding:'10px 12px',fontSize:11,color:'#5A5A5A',fontFamily:'monospace'}}>{u.email}</td>
+                  <td style={{padding:'10px 12px'}}>
+                    <select value={u.equipo} onChange={e=>onUpdate(u.id,{equipo:e.target.value as Rol})}
+                      style={{padding:'5px 8px',borderRadius:8,fontSize:12,border:'1.5px solid #EBEBEB',background:u.equipo==='Usuario'?'#FEF3C7':'#fff',cursor:'pointer',outline:'none'}}>
+                      {ROLES.map(r=><option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </td>
+                  <td style={{padding:'10px 12px'}}>
+                    <input type="checkbox" checked={!!u.es_admin} disabled={esYo}
+                      title={esYo?'No puedes quitarte el admin a ti mismo':''}
+                      onChange={e=>onUpdate(u.id,{es_admin:e.target.checked})} style={{cursor:esYo?'not-allowed':'pointer'}}/>
+                  </td>
+                  <td style={{padding:'10px 12px'}}>
+                    <input type="checkbox" checked={u.activo!==false} disabled={esYo}
+                      title={esYo?'No puedes desactivarte a ti mismo':''}
+                      onChange={e=>onUpdate(u.id,{activo:e.target.checked})} style={{cursor:esYo?'not-allowed':'pointer'}}/>
+                  </td>
+                  <td style={{padding:'10px 12px',fontSize:11,color:'#9A9A9A',fontFamily:'monospace'}}>{(u.created_at||'').slice(0,10)||'—'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ── Vista: Auditoría (solo admin) ─────────────────────────────────
+function AuditoriaView({logs,onRefresh}:{logs:AuditLog[],onRefresh:()=>void}) {
+  const [q,setQ] = useState('')
+  const [accionF,setAccionF] = useState('')
+  const ACCION_LABEL:Record<string,string> = {
+    mover_etapa:'Movió etapa', mover_masivo:'Movió (masivo)', bloquear:'Bloqueó',
+    desbloquear:'Desbloqueó', reabrir:'Reabrió', crear_solicitud:'Creó solicitud',
+    editar_solicitud:'Editó solicitud', cambiar_rol:'Cambió permisos',
+  }
+  const acciones = Array.from(new Set(logs.map(l=>l.accion)))
+  const filtered = logs.filter(l =>
+    (!accionF || l.accion===accionF) &&
+    (!q || (l.usuario_email+' '+(l.solicitud_id||'')+' '+(l.detalle||'')).toLowerCase().includes(q.toLowerCase())))
+  return (
+    <div style={{flex:1,overflowY:'auto',padding:20,background:'#F5F5F5'}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,flexWrap:'wrap' as const}}>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Buscar usuario, ticket o detalle..."
+          style={{padding:'7px 12px',borderRadius:10,fontSize:12,border:'1.5px solid #EBEBEB',background:'#fff',outline:'none',minWidth:240,fontFamily:'inherit'}}/>
+        <select value={accionF} onChange={e=>setAccionF(e.target.value)}
+          style={{padding:'7px 10px',borderRadius:10,fontSize:12,border:'1.5px solid #EBEBEB',background:'#fff',cursor:'pointer',outline:'none'}}>
+          <option value="">Todas las acciones</option>
+          {acciones.map(a=><option key={a} value={a}>{ACCION_LABEL[a]||a}</option>)}
+        </select>
+        <span style={{fontSize:12,color:'#9A9A9A'}}>{filtered.length} de {logs.length}</span>
+        <button onClick={onRefresh} style={{marginLeft:'auto',padding:'6px 12px',borderRadius:20,border:'1.5px solid #EBEBEB',background:'#fff',cursor:'pointer',fontSize:12,fontWeight:600}}>↻ Actualizar</button>
+      </div>
+      <div style={{background:'#fff',borderRadius:14,border:'1px solid #EBEBEB',overflow:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse' as const,fontSize:12}}>
+          <thead><tr style={{borderBottom:'2px solid #EBEBEB'}}>
+            {['Fecha/hora (VE)','Usuario','Rol','Acción','Ticket','Detalle'].map(h=>(
+              <th key={h} style={{textAlign:'left' as const,padding:'10px 12px',color:'#9A9A9A',fontSize:10,fontWeight:700,letterSpacing:'.06em',textTransform:'uppercase' as const}}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {filtered.length===0 ? <tr><td colSpan={6} style={{textAlign:'center' as const,padding:28,color:'#9A9A9A'}}>Sin registros</td></tr>
+            : filtered.map(l=>{
+              const cambioEtapa = l.etapa_anterior || l.etapa_nueva
+              return (
+                <tr key={l.id} style={{borderBottom:'1px solid #EBEBEB'}}>
+                  <td style={{padding:'8px 12px',fontSize:11,color:'#5A5A5A',fontFamily:'monospace',whiteSpace:'nowrap' as const}}>{l.ts_local||(l.ts||'').slice(0,19).replace('T',' ')}</td>
+                  <td style={{padding:'8px 12px',fontSize:11,color:'#5A5A5A'}}>{(l.usuario_email||'').replace('@cashea.app','')}</td>
+                  <td style={{padding:'8px 12px',fontSize:11,color:'#9A9A9A'}}>{l.usuario_rol}</td>
+                  <td style={{padding:'8px 12px',fontSize:11,fontWeight:600}}>{ACCION_LABEL[l.accion]||l.accion}</td>
+                  <td style={{padding:'8px 12px',fontSize:11,fontFamily:'monospace',color:'#9A9A9A'}}>{l.solicitud_id||'—'}</td>
+                  <td style={{padding:'8px 12px',fontSize:11,color:'#5A5A5A',maxWidth:280}}>
+                    {cambioEtapa ? <span>{stageLabel(l.etapa_anterior||'—')} → <b>{stageLabel(l.etapa_nueva||'—')}</b></span> : null}
+                    {l.detalle ? <span style={{color:'#9A9A9A'}}>{cambioEtapa?' · ':''}{l.detalle}</span> : null}
+                    {!cambioEtapa && !l.detalle ? '—' : null}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   )

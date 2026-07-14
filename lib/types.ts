@@ -37,11 +37,27 @@ export interface UsuarioAutorizado {
   id: number
   email: string
   nombre: string
-  equipo: 'Legal' | 'MI' | 'Activaciones' | 'Comercial' | 'Todos'
+  equipo: Rol
   activo: boolean
+  es_admin?: boolean
+  created_at?: string
 }
 
-export type Rol = 'Legal' | 'MI' | 'Activaciones' | 'Comercial' | 'Todos'
+// 'Usuario' = rol base sin permisos (recién registrado, pendiente de asignación)
+export type Rol = 'Usuario' | 'Legal' | 'MI' | 'Activaciones' | 'Comercial' | 'Todos'
+
+export interface AuditLog {
+  id?: number
+  ts?: string            // timestamptz (UTC) del servidor
+  ts_local: string       // fecha/hora en zona horaria de Venezuela (America/Caracas)
+  usuario_email: string
+  usuario_rol: string
+  accion: string         // mover_etapa | bloquear | desbloquear | reabrir | mover_masivo | crear_solicitud | editar_solicitud | cambiar_rol
+  solicitud_id?: string | null
+  etapa_anterior?: string | null
+  etapa_nueva?: string | null
+  detalle?: string | null
+}
 
 export interface Incidencia {
   id?: number
